@@ -1,0 +1,7 @@
+env/
+weights/
+*.pth
+*.engine
+*.onnx
+*.h5
+__pycache__/
