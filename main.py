@@ -57,17 +57,7 @@ def test(opt):
     """ CARGAR DATA PARA PRUEBAS """
 
     """ Load DAS data """
-    if not(os.path.exists(opt.data)):
-        print("Data file {} does not exists!".format(opt.data))
-        exit(1)
-    with h5py.File(opt.data, "r") as f:
-        Nch, Nt = f["strainrate"].shape
-        split = int(0.45 * Nt) #incluye todo menos train data
-        data = f["strainrate"][:, split:].astype(np.float32)
-
-    # se normaliza cada trace respecto a su desviación estandar
-    data /= data.std()
-
+    data = np.load('data/datos_seleccionados.npy')
     """ Init Deep Learning model """
     if opt.trt:
         from utils.engine import TRTModule #if not done here, unable to train
@@ -82,115 +72,83 @@ def test(opt):
     model.to(device)
     model.eval()
 
-    Nwin = data.shape[1] // deep_win
-    # Total number of time samples to be processed
-    Nt_deep = Nwin * deep_win #
+    # Itera sobre cada línea en el archivo
+    total_time = 0
+    max_time = 0
+    for index_x, x in enumerate(data):
+  
+        input_data = x[None,:,:]
+        input_data = torch.from_numpy(input_data)
 
+        start_time = time.time()
+
+        input_data = input_data.to(device)
+        input_data = input_data.unsqueeze(0)
+        input_data = input_data.squeeze(-1)
     
-    data_split = np.stack(np.split(data[:, :Nt_deep], Nwin, axis=-1), axis=0)
-    data_split = np.stack(data_split, axis=0)
-    data_split = np.expand_dims(data_split, axis=-1)
-    # Buffer for impulses
-    batch_size = 1 # PARA TENER SOLO UN DATO EN 1 BATCH
+        y_hat = model(input_data)
 
-    x = np.zeros_like(data_split)
-    N = data_split.shape[0] // batch_size
-    r = data_split.shape[0] % batch_size
-    for i in range(N):
-        n_slice = slice(i * batch_size, (i + 1) * batch_size)
-        x_i = data_split[n_slice]
-        x[n_slice] = x_i
-    # If there is some residual chunk: process that too
-    if r > 0:
-        n_slice = slice((N-1 + 1) * batch_size, None)
-        x_i = data_split[n_slice]
-        x[n_slice] = x_i
-    #x = data
+        end_time = time.time()
+        iteration_time = end_time - start_time
+        total_time += iteration_time
+        if iteration_time > max_time:
+            max_time = iteration_time
 
-    padding_left = kernel.size(2) // 2
-    padding_right = kernel.size(2) - padding_left - 1
-    with open('utils/datos_buenos.txt', 'r') as archivo:
-        # Itera sobre cada línea en el archivo
-        total_time = 0
-        max_time = 0
-        for linea in archivo:
-            # Divide la línea en elementos separados por comas
-            elementos = linea.split(',')
-            # Extrae el primer elemento
-            i = elementos[0]
-            image_index = int(i)
-
-            input_data = x[image_index][None,:,:]
-            input_data = torch.from_numpy(input_data)
-
-            start_time = time.time()
-
-            input_data = input_data.to(device)
-            input_data = input_data.unsqueeze(0)
-            input_data = input_data.squeeze(-1)
+        ##########################################################################################
         
-            y_hat = model(input_data)
+        x_hat = F.conv2d(y_hat, kernel, padding='same', stride=1)
+        x_hat = x_hat[:, :,:opt.deep_win,:]
 
-            end_time = time.time()
-            iteration_time = end_time - start_time
-            total_time += iteration_time
-            if iteration_time > max_time:
-                max_time = iteration_time
-
-            ##########################################################################################
-            
-            x_hat = F.conv2d(y_hat, kernel, padding='same', stride=1)
-            x_hat = x_hat[:, :,:opt.deep_win,:]
-
-            ###########################################################################################
-            
-            x_hat = x_hat.view(24,1024)
-            y_hat = y_hat.view(24,1024)
-
-            x_hat = x_hat.cpu().detach().numpy()
-            y_hat = y_hat.cpu().detach().numpy()
-
-
-            """ GRAFICAR LOS RESULTADOS """
-            samp = 80.
-            t = np.arange(x_hat.shape[1]) / samp
-
-            f, (ax1, ax2,ax3) = plt.subplots(1, 3, sharey=True)
-            ax1.set_title('S')
-            ax2.set_title('E_hat')
-            ax3.set_title('S_hat')
-
-            f.suptitle('DATA'+ str(i), fontsize=16)
-            #subplot1: origina
-            for i, wv in enumerate(x[image_index]):
-                ax1.plot( t, wv - 8 * i, "tab:orange",linewidth=2.5)
-            plt.tight_layout()
-            plt.grid()
-
-            #subplot2: x_hat-> estimación de la entrada (conv kernel con la salida)
-            for i, wv in enumerate(y_hat):
-                ax2.plot(t,(10*wv - 8 * i), "tab:red", linewidth=2.5)
-            plt.tight_layout()
-            plt.grid()
-
-            #subplot3: y_hat->
-            for i, wv in enumerate(x_hat):
-                ax3.plot(t,wv - 8 * i, c="k",linewidth=2.5)
-            plt.tight_layout()
-            plt.grid()
-
-            #plt.savefig("figures/multi_cars_impulse.pdf")
-            plt.grid()
-            #plt.show()
-            nombre_archivo = f'outputs/img_results/{image_index}_{opt.network}.png'
-            plt.savefig(nombre_archivo)
-            plt.close()
+        ###########################################################################################
         
-        total_iterations = 5
-        average_time = total_time / total_iterations
+        x_hat = x_hat.view(24,1024)
+        y_hat = y_hat.view(24,1024)
 
-        print(f"Tiempo promedio: {average_time} segundos")
-        print(f"Tiempo máximo: {max_time} segundos")
+        x_hat = x_hat.cpu().detach().numpy()
+        y_hat = y_hat.cpu().detach().numpy()
+
+        """ 
+        # GRAFICAR LOS RESULTADOS # se toman muchisimo tiempo
+        samp = 80.
+        t = np.arange(x_hat.shape[1]) / samp
+
+        f, (ax1, ax2,ax3) = plt.subplots(1, 3, sharey=True)
+        ax1.set_title('S')
+        ax2.set_title('E_hat')
+        ax3.set_title('S_hat')
+
+        f.suptitle('DATA'+ str(index_x), fontsize=16)
+        #subplot1: origina
+        for i, wv in enumerate(x):
+            ax1.plot( t, wv - 8 * i, "tab:orange",linewidth=2.5)
+        plt.tight_layout()
+        plt.grid()
+
+        #subplot2: x_hat-> estimación de la entrada (conv kernel con la salida)
+        for i, wv in enumerate(y_hat):
+            ax2.plot(t,(10*wv - 8 * i), "tab:red", linewidth=2.5)
+        plt.tight_layout()
+        plt.grid()
+
+        #subplot3: y_hat->
+        for i, wv in enumerate(x_hat):
+            ax3.plot(t,wv - 8 * i, c="k",linewidth=2.5)
+        plt.tight_layout()
+        plt.grid()
+
+        #plt.savefig("figures/multi_cars_impulse.pdf")
+        plt.grid()
+        #plt.show()
+        nombre_archivo = f'outputs/img_results/{index_x}_{opt.network}.png'
+        plt.savefig(nombre_archivo)
+        plt.close() 
+        """
+    
+    total_iterations = len(data)
+    average_time = total_time / total_iterations
+
+    print(f"Tiempo promedio {opt.network}: {average_time*1000} ms")
+    print(f"Tiempo máximo {opt.network}: {max_time*1000} ms")
 
 def parse_opt():
     parser = argparse.ArgumentParser()
