@@ -6,6 +6,9 @@ BATCH_SIZE=$1
 # remeber to do a chmod +x build.sh befor runing with ./build.sh
 #./build.sh "$BATCH_SIZE"  > /dev/null 2>&1 # cambiar  "$BATCH_SIZE" por -1 para construir la red de forma dinamica, no aplica a int8
 
+#COMPARE
+python main.py --network vanilla -trt --weights weights/best.pth --engine weights/best_fp32.engine --engine2 weights/best_fp16.engine --compare
+
 #VANILLA
 python main.py --network vanilla --weights weights/best.pth --numpy_data
 

@@ -13,6 +13,7 @@ from utils.models import UNet
 import argparse
 from utils.utils import *
 import time
+from statistics import mean 
 os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION']='.10'
 
 train_on_gpu = torch.cuda.is_available()
@@ -32,11 +33,8 @@ logging.getLogger('matplotlib').setLevel(logging.ERROR)
 # Global consts
 default_kernel = 'data/kernel.npy' 
 default_data = 'data/DAS_data.h5'
-################################################################################
-""" TEST FUNCTION """
-################################################################################
-def test(opt):
-    deep_win = opt.deep_win
+
+def main(opt):
 
     """ LOAD KERNEL """
     # Verify if file exists
@@ -52,7 +50,36 @@ def test(opt):
     kernel = kernel.to(device)
     kernel = kernel.expand(1, -1, -1, -1)
     kernel = kernel.view(1, 1, 1, -1)
+    
+    """ Init Deep Learning model """
+    if opt.compare or not opt.trt:
+        model = UNet()
+        model = torch.load(opt.weights)
+    if opt.trt:
+        from utils.engine import TRTModule #if not done here, unable to train
+        current_directory = os.path.dirname(os.path.abspath(__file__))
+        engine_path = os.path.join(current_directory,opt.engine)
+        Engine = TRTModule(engine_path,device)
+        Engine.set_desired(['outputs'])
+        if opt.compare:
+            engine_path = os.path.join(current_directory,opt.engine2)
+            Engine2 = TRTModule(engine_path,device)
+            Engine2.set_desired(['outputs'])
+            Engine.to(device).eval()
+            Engine2.to(device).eval()
+        else:
+            model = Engine
+    model.to(device).eval()
 
+    if opt.compare:
+        compare(opt,kernel, model, Engine, Engine2, 1, opt.r_tol )
+    else:
+        eval(opt, kernel, model)
+
+
+def eval(opt, kernel, model):
+
+    deep_win = opt.deep_win
 
     """ CARGAR DATA PARA PRUEBAS """
 
@@ -96,20 +123,6 @@ def test(opt):
             x[n_slice] = x_i
         data = x
     
-    """ Init Deep Learning model """
-    if opt.trt:
-        from utils.engine import TRTModule #if not done here, unable to train
-        current_directory = os.path.dirname(os.path.abspath(__file__))
-        engine_path = os.path.join(current_directory,opt.engine)
-        Engine = TRTModule(engine_path,device)
-        Engine.set_desired(['outputs'])
-        model = Engine
-    else:
-        model = UNet()
-        model = torch.load(opt.weights)
-    model.to(device)
-    model.eval()
-
     # Itera sobre cada línea en el archivo
     total_time = 0
     max_time = 0
@@ -189,22 +202,98 @@ def test(opt):
     print(f"Tiempo máximo {opt.network}: {max_time*1000} ms")
     print("datos procesados: ", len(data))
 
+
+def compare(opt, kernel, model, Engine_fp32,Engine_fp16, batch_size,rtol):
+    model.eval()
+    Engine_fp32.eval()
+    Engine_fp16.eval()
+
+    top_n = 1
+    disagreements_fp32 = np.zeros(top_n,dtype=np.int32)  # Track the number of disagreements for top1 to top5
+    disagreements_fp16 = np.zeros(top_n,dtype=np.int32) 
+
+    mae_errors_fp32 = np.zeros(top_n,dtype=np.float64)
+    mae_errors_fp16 = np.zeros(top_n,dtype=np.float64)
+
+    num_batches = 5000
+
+    closeness_count_fp32 = 0
+    closeness_count_fp16 = 0
+
+    MAES_fp32 = []
+    MSES_fp32 = []
+    MAES_fp16 = []
+    MSES_fp16 = []
+    for i in range(num_batches):
+        torch.manual_seed(i)
+        input = torch.rand(batch_size, 1, 24, 1024) # generamos un input random [0,1)
+
+        input = input.to(device)
+        
+        if input.size(0) != batch_size:
+            print(f"Deteniendo la evaluación. Tamaño del lote ({input.size(0)}) no es igual a batch_size ({batch_size}).")
+            break
+
+        with torch.no_grad():
+            # compute output
+            output_vanilla = model(input)
+            output_fp32 = Engine_fp32(input)
+            output_fp16 = Engine_fp16(input)
+
+        close_values_fp32 = torch.isclose(output_vanilla, output_fp32, rtol=rtol).sum().item()
+        close_values_fp16 = torch.isclose(output_vanilla, output_fp16, rtol=rtol).sum().item()
+
+        closeness_count_fp32 += close_values_fp32
+        closeness_count_fp16 += close_values_fp16
+
+        MAES_fp32.append(F.l1_loss(output_vanilla, output_fp32).item())
+        MSES_fp32.append(F.mse_loss(output_vanilla, output_fp32).item())
+        MAES_fp16.append(F.l1_loss(output_vanilla, output_fp16).item())
+        MSES_fp16.append(F.mse_loss(output_vanilla, output_fp16).item())
+
+    total_values = output_vanilla.size(0)* output_vanilla.size(1)  * output_vanilla.size(2) * output_vanilla.size(3) * num_batches
+    closeness_percentage_fp32 = (closeness_count_fp32 / total_values) * 100
+    closeness_percentage_fp16 = (closeness_count_fp16 / total_values) * 100
+    print(" ")
+    # Print header
+    print("| Vanilla VS | equality (%) |")
+    print("|------------|--------------|")
+    print("| TRT fp32 | {:.2f} |".format(closeness_percentage_fp32))
+    print("| TRT fp16 | {:.2f} |".format(closeness_percentage_fp16))
+    
+    print(" ")
+
+    print("| MAE fp32 | MAE fp16 | MSE fp32 | MSE fp16 |")
+    print("|----------|----------|----------|----------|")
+
+    print("| {:<8} | {:<8} | {:<8} | {:<8} |".format(
+        "{:.8f}".format(mean(MAES_fp32)),
+        "{:.8f}".format(mean(MAES_fp16)),
+        "{:.8f}".format(mean(MSES_fp32)),
+        "{:.8f}".format(mean(MSES_fp16))
+    ))
+    print(" ")
+   
+    return
+
+
 def parse_opt():
     parser = argparse.ArgumentParser()
     parser.add_argument('--data', default=default_data,type=str,help='Dataset to load.')
     parser.add_argument('--weights',default = 'weights/best.pth', type=str,help='Load weights path.')
     parser.add_argument('--engine',default = 'weights/best.engine', type=str,help='Load weights path.')
-    parser.add_argument('--deep_win', default = 1024,type   =int,help='Number of samples per chunk.')
+    parser.add_argument('--engine2',default = 'weights/best_fp16.engine', type=str,help='Load weights path.')
+    parser.add_argument('--deep_win', default = 1024,type=int,help='Number of samples per chunk.')
+    parser.add_argument('--r_tol', default = 1e-2,type=float,help='relative tolerance to compare with isclose.')
     parser.add_argument('--kernel', default = default_kernel, help='Indicates which kernel to use. Receives a <npy> file.')
     parser.add_argument('--network', default = 'vanilla', help='Indicates the name of the network to save de image result.')
     parser.add_argument('-trt','--trt', action='store_true',help='evaluate model on validation set al optimizar con tensorrt')
     parser.add_argument('-numpy_data','--numpy_data', action='store_true',help='add if using the numpy data in data/datos_seleccionados.npy')
     parser.add_argument('-plot','--plot', action='store_true',help='to save the result plots in folder output/img_results')
+    parser.add_argument('-compare','--compare', action='store_true',help='compare the vanilla model with the optimized engine based on the isclose value and other metrics.')
+    
     opt = parser.parse_args()
     return opt
-
-def main(opt):
-	test(opt)
 
 if __name__ == '__main__':
     opt = parse_opt()
