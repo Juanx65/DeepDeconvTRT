@@ -7,10 +7,10 @@ BATCH_SIZE=$1
 #./build.sh "$BATCH_SIZE"  > /dev/null 2>&1 # cambiar  "$BATCH_SIZE" por -1 para construir la red de forma dinamica, no aplica a int8
 
 #VANILLA
-python main.py --network vanilla --weights weights/best.pth
+python main.py --network vanilla --weights weights/best.pth --numpy_data
 
 #TRT FP32
-python main.py --network trtfp32 -trt --engine='weights/best_fp32.engine'
+python main.py --network trtfp32 -trt --engine='weights/best_fp32.engine' --numpy_data
 
 #TRT FP16
-python main.py --network trtfp16 -trt --engine='weights/best_fp16.engine'
+python main.py --network trtfp16 -trt --engine='weights/best_fp16.engine' --numpy_data

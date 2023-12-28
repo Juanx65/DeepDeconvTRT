@@ -57,7 +57,45 @@ def test(opt):
     """ CARGAR DATA PARA PRUEBAS """
 
     """ Load DAS data """
-    data = np.load('data/datos_seleccionados.npy')
+
+    if opt.numpy_data:
+        data = np.load('data/datos_seleccionados.npy')
+    else: 
+        if not(os.path.exists(opt.data)):
+            print("Data file {} does not exists!".format(opt.data))
+            exit(1)
+        with h5py.File(opt.data, "r") as f:
+            Nch, Nt = f["strainrate"].shape
+            split = int(0.45 * Nt) #incluye todo menos train data
+            data = f["strainrate"][:, split:].astype(np.float32)
+
+        # se normaliza cada trace respecto a su desviación estandar
+        data /= data.std()
+        Nwin = data.shape[1] // deep_win
+        # Total number of time samples to be processed
+        Nt_deep = Nwin * deep_win #
+
+        
+        data_split = np.stack(np.split(data[:, :Nt_deep], Nwin, axis=-1), axis=0)
+        data_split = np.stack(data_split, axis=0)
+        data_split = np.expand_dims(data_split, axis=-1)
+        # Buffer for impulses
+        batch_size = 1 # PARA TENER SOLO UN DATO EN 1 BATCH
+
+        x = np.zeros_like(data_split)
+        N = data_split.shape[0] // batch_size
+        r = data_split.shape[0] % batch_size
+        for i in range(N):
+            n_slice = slice(i * batch_size, (i + 1) * batch_size)
+            x_i = data_split[n_slice]
+            x[n_slice] = x_i
+        # If there is some residual chunk: process that too
+        if r > 0:
+            n_slice = slice((N-1 + 1) * batch_size, None)
+            x_i = data_split[n_slice]
+            x[n_slice] = x_i
+        data = x
+    
     """ Init Deep Learning model """
     if opt.trt:
         from utils.engine import TRTModule #if not done here, unable to train
@@ -107,48 +145,49 @@ def test(opt):
         x_hat = x_hat.cpu().detach().numpy()
         y_hat = y_hat.cpu().detach().numpy()
 
-        """ 
+        
         # GRAFICAR LOS RESULTADOS # se toman muchisimo tiempo
-        samp = 80.
-        t = np.arange(x_hat.shape[1]) / samp
+        if opt.plot:
+            samp = 80.
+            t = np.arange(x_hat.shape[1]) / samp
 
-        f, (ax1, ax2,ax3) = plt.subplots(1, 3, sharey=True)
-        ax1.set_title('S')
-        ax2.set_title('E_hat')
-        ax3.set_title('S_hat')
+            f, (ax1, ax2,ax3) = plt.subplots(1, 3, sharey=True)
+            ax1.set_title('S')
+            ax2.set_title('E_hat')
+            ax3.set_title('S_hat')
 
-        f.suptitle('DATA'+ str(index_x), fontsize=16)
-        #subplot1: origina
-        for i, wv in enumerate(x):
-            ax1.plot( t, wv - 8 * i, "tab:orange",linewidth=2.5)
-        plt.tight_layout()
-        plt.grid()
+            f.suptitle('DATA'+ str(index_x), fontsize=16)
+            #subplot1: origina
+            for i, wv in enumerate(x):
+                ax1.plot( t, wv - 8 * i, "tab:orange",linewidth=2.5)
+            plt.tight_layout()
+            plt.grid()
 
-        #subplot2: x_hat-> estimación de la entrada (conv kernel con la salida)
-        for i, wv in enumerate(y_hat):
-            ax2.plot(t,(10*wv - 8 * i), "tab:red", linewidth=2.5)
-        plt.tight_layout()
-        plt.grid()
+            #subplot2: x_hat-> estimación de la entrada (conv kernel con la salida)
+            for i, wv in enumerate(y_hat):
+                ax2.plot(t,(10*wv - 8 * i), "tab:red", linewidth=2.5)
+            plt.tight_layout()
+            plt.grid()
 
-        #subplot3: y_hat->
-        for i, wv in enumerate(x_hat):
-            ax3.plot(t,wv - 8 * i, c="k",linewidth=2.5)
-        plt.tight_layout()
-        plt.grid()
+            #subplot3: y_hat->
+            for i, wv in enumerate(x_hat):
+                ax3.plot(t,wv - 8 * i, c="k",linewidth=2.5)
+            plt.tight_layout()
+            plt.grid()
 
-        #plt.savefig("figures/multi_cars_impulse.pdf")
-        plt.grid()
-        #plt.show()
-        nombre_archivo = f'outputs/img_results/{index_x}_{opt.network}.png'
-        plt.savefig(nombre_archivo)
-        plt.close() 
-        """
-    
+            #plt.savefig("figures/multi_cars_impulse.pdf")
+            plt.grid()
+            #plt.show()
+            nombre_archivo = f'outputs/img_results/{index_x}_{opt.network}.png'
+            plt.savefig(nombre_archivo)
+            plt.close() 
+       
     total_iterations = len(data)
     average_time = total_time / total_iterations
 
     print(f"Tiempo promedio {opt.network}: {average_time*1000} ms")
     print(f"Tiempo máximo {opt.network}: {max_time*1000} ms")
+    print("datos procesados: ", len(data))
 
 def parse_opt():
     parser = argparse.ArgumentParser()
@@ -159,6 +198,8 @@ def parse_opt():
     parser.add_argument('--kernel', default = default_kernel, help='Indicates which kernel to use. Receives a <npy> file.')
     parser.add_argument('--network', default = 'vanilla', help='Indicates the name of the network to save de image result.')
     parser.add_argument('-trt','--trt', action='store_true',help='evaluate model on validation set al optimizar con tensorrt')
+    parser.add_argument('-numpy_data','--numpy_data', action='store_true',help='add if using the numpy data in data/datos_seleccionados.npy')
+    parser.add_argument('-plot','--plot', action='store_true',help='to save the result plots in folder output/img_results')
     opt = parser.parse_args()
     return opt
 
